@@ -2,6 +2,7 @@ import { Pool as PgPool } from 'pg';
 import mysql, { Pool as MySqlPool } from 'mysql2/promise';
 import sql, { ConnectionPool as MssqlPool } from 'mssql';
 import { DatabaseConnection, PoolConfig, PoolStats } from '../types.js';
+import { SSHTunnelManager } from '../ssh-tunnel.js';
 
 const DEFAULT_POOL_CONFIG: PoolConfig = {
   min: 2,
@@ -22,10 +23,23 @@ export class ConnectionPoolManager {
   private pendingCreation: Map<string, Promise<PoolEntry | null>> = new Map();
   private config: PoolConfig;
   private debug: boolean;
+  private sshTunnelManager: SSHTunnelManager;
 
-  constructor(config?: Partial<PoolConfig>, debug = false) {
+  constructor(config?: Partial<PoolConfig>, debug = false, sshTunnelManager?: SSHTunnelManager) {
     this.config = { ...DEFAULT_POOL_CONFIG, ...config };
     this.debug = debug;
+    this.sshTunnelManager = sshTunnelManager || new SSHTunnelManager(debug);
+  }
+
+  /**
+   * Resolve the effective {host, port} for a pooled connection, transparently routing
+   * through the connection's SSH tunnel / jump host profile when one is enabled.
+   */
+  private async resolveEndpoint(
+    connection: DatabaseConnection
+  ): Promise<{ host?: string; port?: number }> {
+    const tunnel = await this.sshTunnelManager.getTunnelEndpoint(connection);
+    return tunnel ?? { host: connection.host, port: connection.port };
   }
 
   private log(message: string): void {
@@ -103,10 +117,11 @@ export class ConnectionPoolManager {
     this.log(`Creating PostgreSQL pool for ${connection.name}`);
 
     const sslConfig = this.getPostgresSslConfig(connection);
+    const endpoint = await this.resolveEndpoint(connection);
 
     const pool = new PgPool({
-      host: connection.host,
-      port: connection.port || 5432,
+      host: endpoint.host,
+      port: endpoint.port || 5432,
       database: connection.database,
       user: connection.user,
       password: connection.properties?.password,
@@ -169,9 +184,10 @@ export class ConnectionPoolManager {
   private async createMysqlPool(connection: DatabaseConnection): Promise<PoolEntry> {
     this.log(`Creating MySQL pool for ${connection.name}`);
 
+    const endpoint = await this.resolveEndpoint(connection);
     const pool = mysql.createPool({
-      host: connection.host,
-      port: connection.port || 3306,
+      host: endpoint.host,
+      port: endpoint.port || 3306,
       database: connection.database,
       user: connection.user,
       password: connection.properties?.password,
@@ -197,10 +213,11 @@ export class ConnectionPoolManager {
 
     const host = connection.host || 'localhost';
     const isAzure = host.includes('.database.windows.net');
+    const endpoint = await this.resolveEndpoint(connection);
 
     const pool = new sql.ConnectionPool({
-      server: host,
-      port: connection.port || 1433,
+      server: endpoint.host || host,
+      port: endpoint.port || 1433,
       database: connection.database,
       user: connection.user,
       password: connection.properties?.password,

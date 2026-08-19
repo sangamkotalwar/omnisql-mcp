@@ -153,23 +153,42 @@ export function sanitizeIdentifier(identifier: string): string {
   return sanitized;
 }
 
+const SENSITIVE_KEY_PATTERN =
+  /password|secretkey|secret|token|apikey|api_key|passphrase|keyvalue|privatekey/i;
+
+/**
+ * Recursively redact any object/array value whose key looks sensitive, at any depth.
+ * Connection `properties` can embed raw nested config (e.g. SSH tunnel / SSL handler
+ * blocks) that a shallow, top-level-only redaction would miss.
+ */
+function deepRedact(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(deepRedact);
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = SENSITIVE_KEY_PATTERN.test(key) && val ? '***REDACTED***' : deepRedact(val);
+    }
+    return out;
+  }
+  return value;
+}
+
 /**
  * Redact sensitive fields from a connection object before returning to clients.
- * Strips passwords and other credentials to prevent credential leaks.
+ * Strips passwords and other credentials (including nested handler/SSH tunnel
+ * config) to prevent credential leaks.
  */
 export function redactConnection(conn: Record<string, any>): Record<string, any> {
   const redacted = { ...conn };
 
-  // Redact password from top-level properties
   if (redacted.properties) {
-    const props = { ...redacted.properties };
-    const sensitiveKeys = ['password', 'secretkey', 'secret', 'token', 'apikey', 'api_key'];
-    for (const key of Object.keys(props)) {
-      if (sensitiveKeys.some((s) => key.toLowerCase().includes(s))) {
-        props[key] = '***REDACTED***';
-      }
-    }
-    redacted.properties = props;
+    redacted.properties = deepRedact(redacted.properties);
+  }
+
+  if (redacted.sshTunnel) {
+    redacted.sshTunnel = deepRedact(redacted.sshTunnel);
   }
 
   return redacted;

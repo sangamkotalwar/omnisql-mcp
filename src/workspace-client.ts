@@ -22,23 +22,41 @@ import {
   buildSchemaQuery,
   buildListTablesQuery,
 } from './utils.js';
+import { SSHTunnelManager } from './ssh-tunnel.js';
 
 export class WorkspaceClient {
   private executablePath: string;
   private timeout: number;
   private debug: boolean;
   private workspacePath?: string;
+  private sshTunnelManager: SSHTunnelManager;
 
   constructor(
     executablePath?: string,
     timeout: number = 30000,
     debug: boolean = false,
-    workspacePath?: string
+    workspacePath?: string,
+    sshTunnelManager?: SSHTunnelManager
   ) {
     this.executablePath = executablePath || findCliExecutable();
     this.timeout = timeout;
     this.debug = debug;
     this.workspacePath = workspacePath;
+    this.sshTunnelManager = sshTunnelManager || new SSHTunnelManager(debug);
+  }
+
+  /**
+   * Resolve the effective {host, port} to connect to for a native driver connection,
+   * transparently routing through the connection's SSH tunnel / jump host profile
+   * (as configured in the DB client's workspace) when one is enabled.
+   */
+  private async resolveEndpoint(
+    connection: DatabaseConnection,
+    host: string,
+    port: number
+  ): Promise<{ host: string; port: number }> {
+    const tunnel = await this.sshTunnelManager.getTunnelEndpoint(connection);
+    return tunnel ?? { host, port };
   }
 
   async executeQuery(connection: DatabaseConnection, query: string): Promise<QueryResult> {
@@ -401,7 +419,15 @@ export class WorkspaceClient {
       ssl = false;
     }
 
-    const client = new Client({ host, port, database, user, password, ssl });
+    const endpoint = await this.resolveEndpoint(connection, host, port);
+    const client = new Client({
+      host: endpoint.host,
+      port: endpoint.port,
+      database,
+      user,
+      password,
+      ssl,
+    });
     try {
       await client.connect();
       const res = await client.query(query);
@@ -442,11 +468,12 @@ export class WorkspaceClient {
     }
 
     const isAzure = host.includes('.database.windows.net');
+    const endpoint = await this.resolveEndpoint(connection, host, port);
     const config = {
       user,
       password,
-      server: host,
-      port,
+      server: endpoint.host,
+      port: endpoint.port,
       database,
       options: {
         encrypt: isAzure,
@@ -556,9 +583,10 @@ export class WorkspaceClient {
     }
 
     const connectTimeout = Math.max(1000, this.timeout);
+    const endpoint = await this.resolveEndpoint(connection, host, port);
     const connectionConfig: mysql.ConnectionOptions = {
-      host,
-      port,
+      host: endpoint.host,
+      port: endpoint.port,
       user,
       password,
       database,

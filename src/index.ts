@@ -11,6 +11,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { WorkspaceConfigParser } from './config-parser.js';
 import { WorkspaceClient } from './workspace-client.js';
+import { SSHTunnelManager } from './ssh-tunnel.js';
 import { BusinessInsight, DatabaseConnection, SchemaDiff } from './types.js';
 import {
   validateQuery,
@@ -62,6 +63,7 @@ class OmniSQLMCPServer {
   private server: Server;
   private configParser: WorkspaceConfigParser;
   private workspaceClient: WorkspaceClient;
+  private sshTunnelManager: SSHTunnelManager;
   private poolManager: ConnectionPoolManager;
   private transactionManager: TransactionManager;
   private debug: boolean;
@@ -110,11 +112,16 @@ class OmniSQLMCPServer {
       workspacePath: process.env.OMNISQL_WORKSPACE,
     });
 
+    // Shared SSH tunnel manager - both the native driver client and the pool manager
+    // route through it, so a jump host connection is only opened once per DB connection.
+    this.sshTunnelManager = new SSHTunnelManager(this.debug);
+
     this.workspaceClient = new WorkspaceClient(
       process.env.OMNISQL_CLI_PATH,
       parseInt(process.env.OMNISQL_TIMEOUT || '30000'),
       this.debug,
-      process.env.OMNISQL_WORKSPACE || this.configParser.getWorkspacePath()
+      process.env.OMNISQL_WORKSPACE || this.configParser.getWorkspacePath(),
+      this.sshTunnelManager
     );
 
     // Initialize connection pool and transaction manager
@@ -125,7 +132,8 @@ class OmniSQLMCPServer {
         idleTimeoutMs: parseInt(process.env.OMNISQL_POOL_IDLE_TIMEOUT || '30000'),
         acquireTimeoutMs: parseInt(process.env.OMNISQL_POOL_ACQUIRE_TIMEOUT || '10000'),
       },
-      this.debug
+      this.debug,
+      this.sshTunnelManager
     );
     this.transactionManager = new TransactionManager(this.poolManager, this.debug);
 
@@ -231,6 +239,11 @@ class OmniSQLMCPServer {
         await this.poolManager.closeAllPools();
       } catch (error) {
         this.log(`Error closing pools during shutdown: ${formatError(error)}`, 'error');
+      }
+      try {
+        await this.sshTunnelManager.closeAllTunnels();
+      } catch (error) {
+        this.log(`Error closing SSH tunnels during shutdown: ${formatError(error)}`, 'error');
       }
       if (this.staleCleanupInterval) {
         clearInterval(this.staleCleanupInterval);
@@ -723,6 +736,22 @@ class OmniSQLMCPServer {
             required: ['connectionId'],
           },
         },
+        // SSH tunnel / jump host tools
+        {
+          name: 'get_ssh_tunnel_info',
+          description:
+            "Get the SSH tunnel / jump host profile associated with a database connection, as configured in the DB client's workspace (network handler config). Secrets are redacted; use test_connection to verify the tunnel actually connects.",
+          inputSchema: {
+            type: 'object',
+            properties: {
+              connectionId: {
+                type: 'string',
+                description: 'The ID or name of the database connection',
+              },
+            },
+            required: ['connectionId'],
+          },
+        },
       ];
 
       // Filter tools based on read-only mode and disabled tools
@@ -906,6 +935,10 @@ class OmniSQLMCPServer {
           // Pool management tools
           case 'get_pool_stats':
             return await this.handleGetPoolStats(args as { connectionId: string });
+
+          // SSH tunnel / jump host tools
+          case 'get_ssh_tunnel_info':
+            return await this.handleGetSshTunnelInfo(args as { connectionId: string });
 
           default:
             throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
@@ -1678,6 +1711,27 @@ class OmniSQLMCPServer {
     };
   }
 
+  // SSH tunnel / jump host handlers
+  private async handleGetSshTunnelInfo(args: { connectionId: string }) {
+    const connectionId = sanitizeConnectionId(args.connectionId);
+    const connection = await this.getConnection(connectionId);
+
+    if (!connection) {
+      throw new McpError(ErrorCode.InvalidParams, `Connection not found: ${connectionId}`);
+    }
+
+    const info = this.sshTunnelManager.getTunnelInfo(connection);
+
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: JSON.stringify(info, null, 2),
+        },
+      ],
+    };
+  }
+
   async run() {
     try {
       // Validate DB client workspace
@@ -1748,16 +1802,21 @@ Environment Variables:
   OMNISQL_READ_ONLY            Disable all write operations (true/false)
   OMNISQL_ALLOWED_CONNECTIONS  Comma-separated whitelist of connection IDs or names
   OMNISQL_DISABLED_TOOLS       Comma-separated list of tools to disable
+  OMNISQL_SSH_PASSWORD         Fallback SSH password if it can't be read from the workspace
+  OMNISQL_SSH_PASSPHRASE       Fallback SSH private key passphrase
+  OMNISQL_SSH_PRIVATE_KEY_PATH Fallback SSH private key file path
 
 Features:
   - Universal database support via your local DB client's saved connections
+  - Automatic SSH tunnel / jump host support (including chained gateway hosts)
+    using the same network handler profile configured in your DB client
   - Read and write operations with safety checks
   - Schema introspection and table management
   - Data export in multiple formats
   - Business insights tracking
   - Resource-based schema browsing
 
-For more information, visit: https://github.com/srthkdev/omnisql-mcp
+For more information, visit: https://github.com/sangameshBB/omnisql-mcp
 `);
   process.exit(0);
 }

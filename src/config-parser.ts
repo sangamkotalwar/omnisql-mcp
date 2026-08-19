@@ -4,13 +4,16 @@ import os from 'os';
 import { parseString } from 'xml2js';
 import { promisify } from 'util';
 import crypto from 'crypto';
-import { DatabaseConnection, WorkspaceConfig } from './types.js';
+import { DatabaseConnection, SSHHop, SSHTunnelConfig, WorkspaceConfig } from './types.js';
 
 const parseXML = promisify(parseString);
 
 // The local DB client (DBeaver-compatible) uses these hardcoded values for password encryption
 const WORKSPACE_AES_KEY = Buffer.from('babb4a9f774ab853c96c2d653dfe544a', 'hex');
 const WORKSPACE_AES_IV = Buffer.alloc(16, 0);
+
+// The network handler id the DB client (DBeaver-compatible) uses for SSH tunnel / jump host config
+const SSH_TUNNEL_HANDLER_IDS = ['ssh_tunnel', 'ssh'];
 
 export class WorkspaceConfigParser {
   private config: WorkspaceConfig;
@@ -211,6 +214,14 @@ export class WorkspaceConfigParser {
         connection.database = config.database || '';
       }
 
+      // Network handlers (SSH tunnel / jump host profile) live alongside `configuration`,
+      // but some workspace versions nest them under `configuration.handlers` instead.
+      const handlers = conn.handlers || conn.configuration?.handlers;
+      const sshTunnel = this.extractSSHTunnelConfig(handlers);
+      if (sshTunnel) {
+        connection.sshTunnel = sshTunnel;
+      }
+
       connections.push(connection);
     }
 
@@ -265,10 +276,136 @@ export class WorkspaceConfigParser {
         connection.database = properties.database || '';
       }
 
+      // Network handlers (SSH tunnel / jump host profile), legacy XML format.
+      // Each <handler> element mirrors <connection> in shape: attributes on $, plus <property> children.
+      if (conn.handler) {
+        const handlers: Record<string, any> = {};
+        const handlerArray = Array.isArray(conn.handler) ? conn.handler : [conn.handler];
+
+        for (const handler of handlerArray) {
+          const handlerId = handler.$?.id || handler.$?.type;
+          if (!handlerId) continue;
+
+          const handlerProps: Record<string, string> = {};
+          if (handler.property) {
+            const propArray = Array.isArray(handler.property)
+              ? handler.property
+              : [handler.property];
+            for (const prop of propArray) {
+              if (prop.$ && prop.$.name && prop.$.value !== undefined) {
+                handlerProps[prop.$.name] = prop.$.value;
+              }
+            }
+          }
+
+          handlers[handlerId] = {
+            type: handler.$?.type,
+            enabled: handler.$?.enabled === 'true' || handler.$?.enabled === true,
+            properties: handlerProps,
+          };
+        }
+
+        const sshTunnel = this.extractSSHTunnelConfig(handlers);
+        if (sshTunnel) {
+          connection.sshTunnel = sshTunnel;
+        }
+      }
+
       connections.push(connection);
     }
 
     return connections;
+  }
+
+  /**
+   * Extract an SSH tunnel / jump host profile from a connection's `handlers` block
+   * (the DB client's network handler configuration). Handles both the DBeaver-compatible
+   * "ssh_tunnel" handler's own host/port/auth and any chained `jumpServerN.*` gateway hosts.
+   */
+  private extractSSHTunnelConfig(handlers: unknown): SSHTunnelConfig | undefined {
+    if (!handlers || typeof handlers !== 'object') {
+      return undefined;
+    }
+
+    const handlersObj = handlers as Record<string, any>;
+    let handler: any;
+
+    for (const candidate of SSH_TUNNEL_HANDLER_IDS) {
+      if (handlersObj[candidate]) {
+        handler = handlersObj[candidate];
+        break;
+      }
+    }
+
+    if (!handler) {
+      return undefined;
+    }
+
+    const props: Record<string, unknown> = handler.properties || {};
+    const str = (v: unknown): string | undefined =>
+      v === undefined || v === null || v === '' ? undefined : String(v);
+    const num = (v: unknown, fallback: number): number => {
+      const n = parseInt(String(v ?? ''), 10);
+      return Number.isFinite(n) ? n : fallback;
+    };
+    const bool = (v: unknown): boolean => v === true || v === 'true';
+
+    const host = str(props.host);
+    if (!host) {
+      // Handler block exists but has no target host configured - nothing usable to report.
+      return undefined;
+    }
+
+    // Group jump server properties by index. Observed workspace formats vary:
+    // "jumpServerN.xxx" (no separator before the index) and "jumpServer.N.xxx" (dot-separated),
+    // alongside a "jumpServer.count" property that records how many are configured. Support both.
+    const jumpIndexes = new Set<number>();
+    const jumpPrefixPatterns = [/^jumpServer(\d+)\./, /^jumpServer\.(\d+)\./];
+    for (const key of Object.keys(props)) {
+      for (const pattern of jumpPrefixPatterns) {
+        const match = pattern.exec(key);
+        if (match) {
+          jumpIndexes.add(parseInt(match[1], 10));
+          break;
+        }
+      }
+    }
+
+    const jumpProp = (idx: number, suffix: string): unknown =>
+      props[`jumpServer${idx}.${suffix}`] ?? props[`jumpServer.${idx}.${suffix}`];
+
+    const jumpServers: SSHHop[] = Array.from(jumpIndexes)
+      .sort((a, b) => a - b)
+      .filter((idx) => bool(jumpProp(idx, 'enabled') ?? true))
+      .map((idx) => ({
+        host: str(jumpProp(idx, 'host')) || '',
+        port: num(jumpProp(idx, 'port'), 22),
+        username: str(jumpProp(idx, 'name') ?? jumpProp(idx, 'user')),
+        authType: str(jumpProp(idx, 'authType')) || 'PASSWORD',
+        password: str(jumpProp(idx, 'password')),
+        privateKeyPath: str(jumpProp(idx, 'keyPath')),
+        passphrase: str(jumpProp(idx, 'keyPassword') ?? jumpProp(idx, 'passphrase')),
+      }))
+      .filter((hop) => hop.host);
+
+    return {
+      enabled: bool(handler.enabled),
+      host,
+      port: num(props.port, 22),
+      username: str(props.user ?? props.username),
+      authType: str(props.authType) || 'PASSWORD',
+      password: str(props.password),
+      privateKeyPath: str(props.keyPath),
+      passphrase: str(props.keyPassword ?? props.passphrase),
+      jumpServers,
+      implementation: str(props.implementation),
+      bypassHostVerification: bool(props.bypassHostVerification),
+      aliveInterval: props.aliveInterval !== undefined ? num(props.aliveInterval, 0) : undefined,
+      connectTimeout:
+        props['tunnel-connect-timeout'] !== undefined
+          ? num(props['tunnel-connect-timeout'], 0)
+          : undefined,
+    };
   }
 
   async getConnection(connectionId: string): Promise<DatabaseConnection | null> {
@@ -424,6 +561,40 @@ export class WorkspaceConfigParser {
               connection.properties.password = creds.password;
             }
           }
+
+          // SSH tunnel / jump host credentials. The exact secret key used for network handler
+          // credentials isn't publicly documented, so we scan for any key that looks like it
+          // belongs to a network handler (e.g. "#network/ssh_tunnel") and merge in whatever
+          // user/password pair we find onto the final SSH hop.
+          if (connection.sshTunnel) {
+            for (const [credKey, credValue] of Object.entries(connCreds)) {
+              if (!/network|ssh_tunnel|ssh-tunnel/i.test(credKey)) continue;
+              const handlerCreds = credValue as Record<string, string> | undefined;
+              if (!handlerCreds) continue;
+
+              if (handlerCreds.user && !connection.sshTunnel.username) {
+                connection.sshTunnel.username = handlerCreds.user;
+              }
+              if (handlerCreds.password && !connection.sshTunnel.password) {
+                connection.sshTunnel.password = handlerCreds.password;
+              }
+              if (handlerCreds.passphrase && !connection.sshTunnel.passphrase) {
+                connection.sshTunnel.passphrase = handlerCreds.passphrase;
+              }
+            }
+          }
+        }
+
+        // Fall back to environment variable overrides when the workspace didn't yield
+        // usable SSH tunnel secrets (e.g. unrecognized credential key format, or a
+        // key-file passphrase that DBeaver prompts for interactively rather than storing).
+        if (connection.sshTunnel) {
+          connection.sshTunnel.password =
+            connection.sshTunnel.password || process.env.OMNISQL_SSH_PASSWORD;
+          connection.sshTunnel.passphrase =
+            connection.sshTunnel.passphrase || process.env.OMNISQL_SSH_PASSPHRASE;
+          connection.sshTunnel.privateKeyPath =
+            connection.sshTunnel.privateKeyPath || process.env.OMNISQL_SSH_PRIVATE_KEY_PATH;
         }
       }
 

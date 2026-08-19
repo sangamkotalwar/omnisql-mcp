@@ -12,6 +12,58 @@ export interface DatabaseConnection {
   readonly?: boolean;
   folder?: string;
   properties?: Record<string, string>;
+  /** SSH tunnel / jump host profile associated with this connection (from the DBeaver-compatible workspace) */
+  sshTunnel?: SSHTunnelConfig;
+}
+
+/** A single hop in an SSH jump-server chain (localhost -> jump0 -> jump1 -> ... -> final hop) */
+export interface SSHHop {
+  host: string;
+  port: number;
+  username?: string;
+  authType: 'PASSWORD' | 'PUBLIC_KEY' | 'AGENT' | string;
+  password?: string;
+  privateKeyPath?: string;
+  passphrase?: string;
+}
+
+/**
+ * SSH tunnel configuration extracted from a DBeaver connection's "ssh_tunnel" network handler,
+ * including any configured jump servers (gateway hosts) that must be traversed to reach the
+ * final SSH host, which is then used to forward a local port to the target database.
+ */
+export interface SSHTunnelConfig extends SSHHop {
+  enabled: boolean;
+  /** Ordered chain of gateway/jump hosts to traverse before reaching this handler's host (jumpServer0 closest to the client) */
+  jumpServers: SSHHop[];
+  implementation?: string;
+  bypassHostVerification?: boolean;
+  aliveInterval?: number;
+  connectTimeout?: number;
+}
+
+/** Redacted, display-safe view of an SSHHop (no secrets) */
+export interface SSHHopSummary {
+  host: string;
+  port: number;
+  username?: string;
+  authType: string;
+  hasPassword: boolean;
+  hasPrivateKey: boolean;
+  privateKeyPath?: string;
+}
+
+/** Redacted, display-safe view of a connection's SSH tunnel / jump host profile */
+export interface SSHTunnelInfo {
+  connectionId: string;
+  connectionName: string;
+  enabled: boolean;
+  finalHop?: SSHHopSummary;
+  jumpServers: SSHHopSummary[];
+  targetHost?: string;
+  targetPort?: number;
+  implementation?: string;
+  message?: string;
 }
 
 export interface QueryResult {

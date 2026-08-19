@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0] - 2026-08-19
+
+### Added
+- **SSH tunnel / jump host support**: connections that use an SSH tunnel network handler in your DB client workspace (including chained jump servers / gateway hosts) are now transparently tunneled for `execute_query`, `write_query`, `test_connection`, transactions, and pooled connections. Supports password, public key, and SSH agent authentication per hop.
+- **New tool `get_ssh_tunnel_info`**: inspect a connection's SSH tunnel / jump host profile (host, port, auth type, jump server chain) without exposing secrets.
+- New env vars `OMNISQL_SSH_PASSWORD`, `OMNISQL_SSH_PASSPHRASE`, `OMNISQL_SSH_PRIVATE_KEY_PATH` as a fallback when the SSH secret can't be recovered from the workspace's encrypted credential store.
+
+### Changed
+- `redactConnection` now redacts sensitive fields recursively (previously only scanned top-level `properties` keys), so nested handler config (SSH tunnel, SSL, etc.) can no longer leak secrets through `list_connections` / `get_connection_info`.
+
 ## [2.0.1] - 2026-04-20
 
 ### Changed

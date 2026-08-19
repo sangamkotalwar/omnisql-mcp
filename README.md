@@ -22,6 +22,7 @@ Universal database MCP server — give AI assistants read/write access to your d
 ## Features
 
 - Reuses connections already configured in your local DB client workspace — no duplicate setup
+- **Automatic SSH tunnel / jump host support**: transparently connects through the same SSH tunnel and gateway/jump host profile configured on the connection (including chained jump servers), no separate tunnel setup needed
 - Native query execution for PostgreSQL, MySQL/MariaDB, SQLite, SQL Server
 - Connection pooling with configurable pool size and timeouts
 - Transaction support (BEGIN/COMMIT/ROLLBACK)
@@ -104,6 +105,9 @@ Add to Cursor Settings > MCP Servers:
 | `OMNISQL_POOL_MAX` | Maximum connections per pool | `10` |
 | `OMNISQL_POOL_IDLE_TIMEOUT` | Idle connection timeout (ms) | `30000` |
 | `OMNISQL_POOL_ACQUIRE_TIMEOUT` | Connection acquire timeout (ms) | `10000` |
+| `OMNISQL_SSH_PASSWORD` | Fallback SSH password if it can't be read from the workspace | Unset |
+| `OMNISQL_SSH_PASSPHRASE` | Fallback SSH private key passphrase | Unset |
+| `OMNISQL_SSH_PRIVATE_KEY_PATH` | Fallback SSH private key file path | Unset |
 
 ### Read-Only Mode
 
@@ -184,6 +188,9 @@ Restrict which workspace connections are visible. Accepts connection IDs or disp
 - `compare_schemas` - Compare schemas between two connections
 - `get_pool_stats` - Get connection pool statistics
 
+### SSH Tunnel / Jump Host
+- `get_ssh_tunnel_info` - Inspect the SSH tunnel / jump host profile associated with a connection (redacted, no secrets)
+
 ### Other
 - `get_database_stats` - Database statistics
 - `append_insight` - Store analysis notes
@@ -206,10 +213,20 @@ Supports both configuration formats written by DBeaver-compatible DB clients:
 
 Credentials are automatically decrypted from the workspace `credentials-config.json`.
 
+## SSH Tunnel / Jump Host Support
+
+If a connection has an SSH tunnel (network handler) configured in your DB client — including one or more chained jump servers / gateway hosts — every native query, `test_connection`, transaction, and pooled connection transparently routes through it. No separate tunnel setup is required: the server opens a local port forward through the same SSH hop chain your DB client would use and connects the native driver (`pg`, `mysql2`, `mssql`) to that local endpoint.
+
+- Supports password, public key, and SSH agent authentication per hop
+- Supports chained jump servers (`localhost -> jump host(s) -> final SSH host -> database`)
+- Tunnels are opened once per connection and reused across queries; closed on shutdown
+- Use `get_ssh_tunnel_info` to inspect a connection's tunnel/jump host profile (host, port, auth type, jump server count) without exposing any secrets
+- If a password or key passphrase can't be recovered from the workspace's encrypted credential store, set `OMNISQL_SSH_PASSWORD`, `OMNISQL_SSH_PASSPHRASE`, or `OMNISQL_SSH_PRIVATE_KEY_PATH` as a fallback
+
 ## Development
 
 ```bash
-git clone https://github.com/srthkdev/omnisql-mcp.git
+git clone https://github.com/sangameshBB/omnisql-mcp.git
 cd omnisql-mcp
 npm install
 npm run build

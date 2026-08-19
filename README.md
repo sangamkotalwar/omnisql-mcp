@@ -2,7 +2,8 @@
 
 Universal database MCP server — give AI assistants read/write access to your databases using connections already saved in your local DB client workspace (DBeaver-compatible).
 
-[![npm version](https://badge.fury.io/js/omnisql-mcp.svg)](https://www.npmjs.com/package/omnisql-mcp)
+> This is a fork of [srthkdev/omnisql-mcp](https://github.com/srthkdev/omnisql-mcp) that adds SSH tunnel / jump host support. It is **not published to npm** — build it from this repo (see [Installation](#installation)).
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg)](https://nodejs.org/)
 
@@ -42,9 +43,22 @@ Universal database MCP server — give AI assistants read/write access to your d
 
 ## Installation
 
+This fork isn't published to npm — build it from source:
+
 ```bash
-npm install -g omnisql-mcp
+git clone https://github.com/sangameshBB/omnisql-mcp.git
+cd omnisql-mcp
+npm install
+npm run build
 ```
+
+Then link the built server so the `omnisql-mcp` command points at it:
+
+```bash
+npm install -g .
+```
+
+> **Do not run `npm install -g omnisql-mcp` on its own.** That installs the original upstream package from the npm registry, which does **not** have SSH tunnel / jump host support. You must clone this repo and build it locally, then run `npm install -g .` from inside the cloned folder as shown above.
 
 ## Configuration
 
@@ -85,6 +99,21 @@ Add to Cursor Settings > MCP Servers:
   "mcpServers": {
     "omnisql": {
       "command": "omnisql-mcp"
+    }
+  }
+}
+```
+
+### Without a global install
+
+If you'd rather not run `npm install -g .`, point your MCP client directly at the built entry point instead:
+
+```json
+{
+  "mcpServers": {
+    "omnisql": {
+      "command": "node",
+      "args": ["/absolute/path/to/omnisql-mcp/dist/index.js"]
     }
   }
 }

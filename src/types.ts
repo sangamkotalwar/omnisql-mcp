@@ -40,6 +40,8 @@ export interface SSHTunnelConfig extends SSHHop {
   bypassHostVerification?: boolean;
   aliveInterval?: number;
   connectTimeout?: number;
+  /** Name of the shared DB client "Network Profile" this tunnel config was resolved from, if any */
+  profileName?: string;
 }
 
 /** Redacted, display-safe view of an SSHHop (no secrets) */

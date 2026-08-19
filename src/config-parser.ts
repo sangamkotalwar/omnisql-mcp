@@ -216,9 +216,18 @@ export class WorkspaceConfigParser {
 
       // Network handlers (SSH tunnel / jump host profile) live alongside `configuration`,
       // but some workspace versions nest them under `configuration.handlers` instead.
-      const handlers = conn.handlers || conn.configuration?.handlers;
+      // A connection can also reference a shared, reusable "Network Profile" by name
+      // (configuration['config-profile']) instead of embedding its own handler config -
+      // in that case the actual host/port/auth live in the top-level `network-profiles`
+      // block and the connection's own `handlers.ssh_tunnel` is just an enabled flag.
+      const profileName = conn.configuration?.['config-profile'];
+      const profileHandlers = profileName
+        ? data['network-profiles']?.[profileName]?.handlers
+        : undefined;
+      const handlers = profileHandlers || conn.handlers || conn.configuration?.handlers;
       const sshTunnel = this.extractSSHTunnelConfig(handlers);
       if (sshTunnel) {
+        sshTunnel.profileName = profileHandlers ? profileName : undefined;
         connection.sshTunnel = sshTunnel;
       }
 
@@ -567,21 +576,17 @@ export class WorkspaceConfigParser {
           // belongs to a network handler (e.g. "#network/ssh_tunnel") and merge in whatever
           // user/password pair we find onto the final SSH hop.
           if (connection.sshTunnel) {
-            for (const [credKey, credValue] of Object.entries(connCreds)) {
-              if (!/network|ssh_tunnel|ssh-tunnel/i.test(credKey)) continue;
-              const handlerCreds = credValue as Record<string, string> | undefined;
-              if (!handlerCreds) continue;
+            this.mergeHandlerCredentials(connCreds, connection.sshTunnel);
+          }
+        }
 
-              if (handlerCreds.user && !connection.sshTunnel.username) {
-                connection.sshTunnel.username = handlerCreds.user;
-              }
-              if (handlerCreds.password && !connection.sshTunnel.password) {
-                connection.sshTunnel.password = handlerCreds.password;
-              }
-              if (handlerCreds.passphrase && !connection.sshTunnel.passphrase) {
-                connection.sshTunnel.passphrase = handlerCreds.passphrase;
-              }
-            }
+        // When the tunnel config was resolved from a shared Network Profile rather than
+        // embedded in the connection itself, its saved credentials (if any) live under a
+        // separate top-level "profile:<name>" key in the credentials store.
+        if (connection.sshTunnel?.profileName) {
+          const profileCreds = credentials[`profile:${connection.sshTunnel.profileName}`];
+          if (profileCreds) {
+            this.mergeHandlerCredentials(profileCreds, connection.sshTunnel);
           }
         }
 
@@ -606,6 +611,33 @@ export class WorkspaceConfigParser {
         console.error(`Failed to load credentials: ${error}`);
       }
       // Don't throw - continue without credentials
+    }
+  }
+
+  /**
+   * Merge any user/password/passphrase found in a credentials-store object into an
+   * SSH tunnel config, without overwriting values already resolved elsewhere. Scans
+   * for any key that looks like it belongs to a network handler (e.g. "#network/ssh_tunnel")
+   * since the exact secret key naming isn't publicly documented.
+   */
+  private mergeHandlerCredentials(
+    credsObject: Record<string, unknown>,
+    sshTunnel: SSHTunnelConfig
+  ): void {
+    for (const [credKey, credValue] of Object.entries(credsObject)) {
+      if (!/network|ssh_tunnel|ssh-tunnel/i.test(credKey)) continue;
+      const handlerCreds = credValue as Record<string, string> | undefined;
+      if (!handlerCreds) continue;
+
+      if (handlerCreds.user && !sshTunnel.username) {
+        sshTunnel.username = handlerCreds.user;
+      }
+      if (handlerCreds.password && !sshTunnel.password) {
+        sshTunnel.password = handlerCreds.password;
+      }
+      if (handlerCreds.passphrase && !sshTunnel.passphrase) {
+        sshTunnel.passphrase = handlerCreds.passphrase;
+      }
     }
   }
 

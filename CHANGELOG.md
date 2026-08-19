@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-08-19
+
+### Added
+- **Native Trino / Presto support** via `trino-client`: `execute_query`, `write_query` (n/a, read-only engine), `test_connection`, `list_tables`, and `get_table_schema` now work for `trino_jdbc`/`presto` driver connections, including through an SSH tunnel / jump host when configured.
+- `list_tables`/`get_table_schema` for Trino use `system.jdbc.tables`/`system.jdbc.columns`, which work without a default catalog/schema on the connection (unlike `information_schema`).
+
+### Fixed
+- Trino's query engine rejects a trailing statement-terminating semicolon (unlike JDBC-style drivers); the server now strips one before sending a query to Trino.
+
 ## [2.1.0] - 2026-08-19
 
 ### Added

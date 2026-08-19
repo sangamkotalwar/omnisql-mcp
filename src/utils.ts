@@ -247,6 +247,10 @@ export function getTestQuery(driver: string): string {
     return 'db.version()';
   } else if (driverLower.includes('redis')) {
     return 'INFO server';
+  } else if (driverLower.includes('trino') || driverLower.includes('presto')) {
+    // The system catalog is always available regardless of the connection's default
+    // catalog/schema, so this works even when neither is configured.
+    return 'SELECT node_version FROM system.runtime.nodes LIMIT 1;';
   } else {
     // Generic test query
     return 'SELECT 1;';
@@ -319,6 +323,22 @@ export function buildSchemaQuery(driver: string, tableName: string): string {
       FROM INFORMATION_SCHEMA.COLUMNS
       WHERE TABLE_NAME = '${safeTableName}'
       ORDER BY ORDINAL_POSITION;
+    `;
+  } else if (driverLower.includes('trino') || driverLower.includes('presto')) {
+    // system.jdbc.columns is catalog-agnostic (unlike information_schema.columns, which
+    // requires a default catalog on the connection), so this works for any connection.
+    return `
+      SELECT
+        column_name,
+        type_name as data_type,
+        is_nullable,
+        column_def as column_default,
+        column_size as character_maximum_length,
+        num_prec_radix as numeric_precision,
+        decimal_digits as numeric_scale
+      FROM system.jdbc.columns
+      WHERE table_name = '${safeTableName}'
+      ORDER BY ordinal_position;
     `;
   } else {
     // Generic fallback
@@ -425,6 +445,28 @@ export function buildListTablesQuery(
     }
 
     query += ` ORDER BY table_name;`;
+    return query;
+  } else if (driverLower.includes('trino') || driverLower.includes('presto')) {
+    // system.jdbc.tables is catalog-agnostic (unlike information_schema.tables, which
+    // requires a default catalog on the connection), so this works for any connection.
+    let query = `
+      SELECT
+        table_name,
+        table_type,
+        table_schem as table_schema
+      FROM system.jdbc.tables
+      WHERE table_schem NOT IN ('information_schema')
+    `;
+
+    if (safeSchema) {
+      query += ` AND table_schem = '${safeSchema}'`;
+    }
+
+    if (!includeViews) {
+      query += ` AND table_type = 'TABLE'`;
+    }
+
+    query += ` ORDER BY table_schem, table_name;`;
     return query;
   } else {
     // Generic fallback

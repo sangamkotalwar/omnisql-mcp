@@ -7,6 +7,7 @@ import csv from 'csv-parser';
 import { Client } from 'pg';
 import sql from 'mssql';
 import mysql from 'mysql2/promise';
+import { Trino, BasicAuth } from 'trino-client';
 import {
   DatabaseConnection,
   QueryResult,
@@ -192,6 +193,15 @@ export class WorkspaceClient {
     );
   }
 
+  /**
+   * Check if a driver speaks the Trino/Presto REST API. Presto is Trino's predecessor
+   * and exposes a compatible enough protocol for the same client to work in most cases.
+   */
+  private isTrinoCompatible(driver: string): boolean {
+    const d = driver.toLowerCase();
+    return d.includes('trino') || d.includes('presto');
+  }
+
   private async executeWithNativeTool(
     connection: DatabaseConnection,
     query: string
@@ -210,6 +220,8 @@ export class WorkspaceClient {
       return this.executeSQLServerQuery(connection, query);
     } else if (driver.includes('mysql') || driver.includes('mariadb')) {
       return this.executeMySQLQuery(connection, query);
+    } else if (this.isTrinoCompatible(driver)) {
+      return this.executeTrinoQuery(connection, query);
     } else {
       // Unsupported driver – try the CLI as a best-effort fallback, but
       // wrap with a clear error message listing the natively supported drivers.
@@ -218,7 +230,7 @@ export class WorkspaceClient {
       } catch (cliError) {
         const driverName = connection.driver;
         const nativeDrivers =
-          'PostgreSQL (+ CockroachDB, TimescaleDB, Redshift, YugabyteDB, Supabase, Neon, Citus, AlloyDB), MySQL/MariaDB, SQL Server (MSSQL), SQLite';
+          'PostgreSQL (+ CockroachDB, TimescaleDB, Redshift, YugabyteDB, Supabase, Neon, Citus, AlloyDB), MySQL/MariaDB, SQL Server (MSSQL), SQLite, Trino/Presto';
         const cliMsg = cliError instanceof Error ? cliError.message : String(cliError);
         throw new Error(
           `Database driver "${driverName}" is not natively supported. ` +
@@ -644,6 +656,68 @@ export class WorkspaceClient {
         }
       }
     }
+  }
+
+  private async executeTrinoQuery(
+    connection: DatabaseConnection,
+    query: string
+  ): Promise<QueryResult> {
+    const host = connection.host || connection.properties?.host || 'localhost';
+    const port =
+      connection.port ||
+      (connection.properties?.port ? parseInt(connection.properties.port) : 8080);
+    const user =
+      connection.user || connection.properties?.user || process.env.TRINO_USER || 'trino';
+    const password = connection.properties?.password;
+    const catalog = connection.properties?.catalog || connection.database || undefined;
+    const schema = connection.properties?.schema || undefined;
+
+    // Determine http vs https. DBeaver's Trino driver stores the raw JDBC URL
+    // (jdbc:trino://host:port[/catalog[/schema]]); port 443 is a strong signal too.
+    const rawUrl = connection.properties?.url || connection.url || '';
+    const sslProp = connection.properties?.['ssl.enabled'] ?? connection.properties?.ssl;
+    const useHttps =
+      /^jdbc:trino:https:/i.test(rawUrl) ||
+      /^https:/i.test(rawUrl) ||
+      port === 443 ||
+      sslProp === 'true';
+
+    const endpoint = await this.resolveEndpoint(connection, host, port);
+    const server = `${useHttps ? 'https' : 'http'}://${endpoint.host}:${endpoint.port}`;
+
+    const trino = Trino.create({
+      server,
+      catalog,
+      schema,
+      auth: new BasicAuth(user, password),
+      ssl: useHttps ? { rejectUnauthorized: false } : undefined,
+      extraHeaders: { 'X-Trino-Source': 'omnisql-mcp' },
+    });
+
+    // Trino's parser rejects a trailing statement-terminating semicolon (unlike most
+    // JDBC drivers, which tolerate it) - strip one if present.
+    const trinoQuery = query.trim().replace(/;+\s*$/, '');
+
+    const iter = await trino.query(trinoQuery);
+
+    const columns: string[] = [];
+    const rows: any[][] = [];
+
+    for await (const result of iter) {
+      if (result.error) {
+        throw new Error(
+          `Trino query failed (${result.error.errorName || result.error.errorType}): ${result.error.message}`
+        );
+      }
+      if (result.columns && columns.length === 0) {
+        columns.push(...result.columns.map((c) => c.name));
+      }
+      if (result.data) {
+        rows.push(...result.data);
+      }
+    }
+
+    return { columns, rows, rowCount: rows.length, executionTime: 0 };
   }
 
   private async executeCli(args: string[]): Promise<void> {

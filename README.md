@@ -14,6 +14,7 @@ Universal database MCP server — give AI assistants read/write access to your d
 - MySQL / MariaDB (via `mysql2`)
 - SQL Server / MSSQL (via `mssql`)
 - SQLite (via `sqlite3` CLI)
+- Trino / Presto (via `trino-client`)
 
 **Postgres-compatible** (routed through `pg` driver automatically):
 - CockroachDB, TimescaleDB, Amazon Redshift, YugabyteDB, AlloyDB, Supabase, Neon, Citus
@@ -24,8 +25,8 @@ Universal database MCP server — give AI assistants read/write access to your d
 
 - Reuses connections already configured in your local DB client workspace — no duplicate setup
 - **Automatic SSH tunnel / jump host support**: transparently connects through the same SSH tunnel and gateway/jump host profile configured on the connection (including chained jump servers), no separate tunnel setup needed
-- Native query execution for PostgreSQL, MySQL/MariaDB, SQLite, SQL Server
-- Connection pooling with configurable pool size and timeouts
+- Native query execution for PostgreSQL, MySQL/MariaDB, SQLite, SQL Server, Trino/Presto
+- Connection pooling with configurable pool size and timeouts (pooling not applicable to SQLite or Trino/Presto, which are connectionless per query)
 - Transaction support (BEGIN/COMMIT/ROLLBACK)
 - Query execution plan analysis (EXPLAIN)
 - Schema comparison between connections with migration script generation
@@ -251,6 +252,15 @@ If a connection has an SSH tunnel (network handler) configured in your DB client
 - Tunnels are opened once per connection and reused across queries; closed on shutdown
 - Use `get_ssh_tunnel_info` to inspect a connection's tunnel/jump host profile (host, port, auth type, jump server count) without exposing any secrets
 - If a password or key passphrase can't be recovered from the workspace's encrypted credential store, set `OMNISQL_SSH_PASSWORD`, `OMNISQL_SSH_PASSPHRASE`, or `OMNISQL_SSH_PRIVATE_KEY_PATH` as a fallback
+
+## Trino / Presto Support
+
+Trino connections work over HTTPS/HTTP (Basic Auth) using the same host/user/password already saved for the connection. A few Trino-specific notes:
+
+- **Catalog/schema are optional.** If the connection has no default catalog/schema configured (common when browsing multiple catalogs in DBeaver), queries must fully qualify tables as `catalog.schema.table`.
+- **`list_tables` and `get_table_schema` are catalog-agnostic** by design (via `system.jdbc.tables`/`system.jdbc.columns`), so they work without a default catalog — but on a large multi-catalog cluster this scans metadata across every catalog, which can be slow and may return duplicate rows if the same table name exists in more than one catalog/schema. For a fast, unambiguous lookup, use `execute_query` with `DESCRIBE catalog.schema.table` instead.
+- SSH tunneling (above) works the same way for Trino connections as any other driver.
+- Trino has no persistent session/transaction model in this server — `begin_transaction` and connection pooling are not available for Trino connections (same as SQLite).
 
 ## Development
 
